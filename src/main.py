@@ -8,7 +8,6 @@ import os
 import youtube_dl
 import shutil
 from urlextract import URLExtract
-logging.getLogger("filelock").disabled = True
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
 from telegram import ChatAction
 from functools import wraps
@@ -16,50 +15,41 @@ import re
 import urllib
 
 os.chdir(os.path.dirname(__file__))
+logging.getLogger("filelock").disabled = True
 
-DOWNLOADS_DIR = "video_downloads"
+download_dir = "videos"
+max_file_size = 100
 
 cur_file_counter = 0
+downloaded_files = []
 
+
+# custom url regexs
 tiktok_regex = re.compile("https?://(?:www\.)?(?:vm\.)?tiktok\.com/[^/]+/?")
+youtube_regex = re.compile("https?://(?:www\.)?youtube\.com/[^/]+/?")
+youtube_mobile_regex = re.compile("https?://(?:www\.)?youtu\.be\/[^/]+/?")
 
-
-def is_tiktok(url: str) -> bool:
-    return tiktok_regex.match(url) is not None
+# links that youtube dl wont catch
+problem_regex = [tiktok_regex]
+# links that should download without a command
+auto_download_regex = [tiktok_regex, youtube_regex, youtube_mobile_regex]
 
 
 def is_video(url: str) -> bool:
+    """Check if a url is one which can be downloaded"""
     for extractor in youtube_dl.extractor.gen_extractors():
         if extractor.suitable(url) and extractor.IE_NAME != "generic":
             return True
-    return is_tiktok(url)
+    return any(regex.match(url) is not None for regex in problem_regex)
 
-def is_general_download(url: str) -> bool:
-    return is_video(url)
 
 def is_auto_download(url: str) -> bool:
-    return is_tiktok(url)
-
-def get_length(url: str):
-    ydl_opts = {
-        "quiet": False,
-    }
-    with youtube_dl.YoutubeDL(ydl_opts) as ydl:
-        video_info = ydl.extract_info(url, download=False)
-        if video_info["duration"] is None:
-            return 1e99
-        return video_info["duration"]
+    """Check if a url is one which should automatically download"""
+    return any(regex.match(url) is not None for regex in auto_download_regex)
 
 
-def download_video(url: str, filename: str, max_length: int = 480) -> int:
-    # if get_length(url) > 480:
-    #     return 999991
-    ydl_opts = {
-        "format": "mp4",
-        "outtmpl": filename,
-        "max_filesize": 50000000,
-        "ignoreerrors": False,
-    }
+def download_video(url: str, ydl_opts: dict) -> int:
+    """Download a url to the computer"""
     with youtube_dl.YoutubeDL(ydl_opts) as ydl:
         try:
             err = ydl.download([url])
@@ -67,108 +57,144 @@ def download_video(url: str, filename: str, max_length: int = 480) -> int:
             err = -1
     return err
 
-def extract_url(text):
-    urls = URLExtract().find_urls(text)
+
+def extract_url(message):
+    """Get the first url in a string"""
+    urls = URLExtract().find_urls(message)
     if len(urls) == 0:
         return None
-        
     url = urls[0]
     return url
 
-def download_command(update, context):
-    global cur_file_counter
-    filename = f"{cur_file_counter}.mp4"
-    logging.info("HEY")
 
+def parse_message(update, context, is_command=False, force_audio=False):
+    """Parse a any message and check whether or not it contains a link,
+    whether or not it is a command, and whether or not it can actually download something"""
+    global cur_file_counter
+
+    # ensure it's a real message
     if not hasattr(update.message, "text"):
         return
 
     url = extract_url(update.message.text)
 
+    # if it's a check up one reply for url
     if url is None:
-        if update.message.reply_to_message is not None:
-            url = extract_url(update.message.reply_to_message.text)
-            if url is None:
-                return
+        if is_command:
+            if update.message.reply_to_message is not None:
+                url = extract_url(update.message.reply_to_message.text)
+                if url is None:
+                    return
+        else:
+            return
 
+    # check if the file has already been downloaded
+    for downloaded in downloaded_files:
+        if downloaded["url"] == url:
+            user = update.message.from_user["username"]
+            # check if the sent file was in another chat
+            if update.message.chat_id != downloaded["message"].chat_id:
+                already_sent_message = downloaded["message"].forward(
+                    update.message.chat_id
+                )
+            else:
+                already_sent_message = downloaded["message"]
+            already_sent_message.reply_text(f"@{user}")
+            return
 
-    if not is_general_download(url):
+    # make sure we can actually download the url
+    if not is_command and not is_auto_download(url):
         return
 
-    context.bot.send_chat_action(
-        chat_id=update.effective_message.chat_id, action=ChatAction.UPLOAD_VIDEO
-    )
-
+    if not is_video(url):
+        return
 
     logging.debug(f"Downloading from {url}...")
-    err = download_video(url, filename)
+
+    ydl_opts = {
+        "max_filesize": max_file_size * 1000000,
+        "ignoreerrors": False,
+    }
+    if force_audio:
+        # download the url as audio
+        context.bot.send_chat_action(
+            chat_id=update.effective_message.chat_id, action=ChatAction.UPLOAD_AUDIO
+        )
+
+        filename = f"{cur_file_counter}.mp3"
+        ydl_opts.update(
+            {
+                "outtmpl": filename,
+                "format": "bestaudio/best",
+                "postprocessors": [
+                    {
+                        "key": "FFmpegExtractAudio",
+                        "preferredcodec": "mp3",
+                        "preferredquality": "192",
+                    }
+                ],
+            }
+        )
+    else:
+        # download the url as a video
+        context.bot.send_chat_action(
+            chat_id=update.effective_message.chat_id, action=ChatAction.UPLOAD_VIDEO
+        )
+        filename = f"{cur_file_counter}.mp4"
+        ydl_opts.update(
+            {
+                "format": "mp4",
+                "outtmpl": filename,
+            }
+        )
+
+    # download and check for errors
+    err = download_video(url, ydl_opts)
 
     if not os.path.exists(filename):
-        update.message.reply_text("Error downloading video")
+        update.message.reply_text("Error downloading")
         return
 
     cur_file_counter += 1
 
-    update.message.reply_video(open(filename, "rb"), supports_streaming=True, timeout=100)
+    if force_audio:
+        # send the file as audio
+        reply_message = update.message.reply_audio(open(filename, "rb"), timeout=100)
+    else:
+        # send the file as a videos
+        reply_message = update.message.reply_video(open(filename, "rb"), timeout=100)
+    downloaded_files.append({"url": url, "message": reply_message})
+
+
+def download_command(update, context):
+    parse_message(update, context, True, False)
+
+
+def audio_command(update, context):
+    parse_message(update, context, True, True)
 
 
 def on_message(update, context):
-    global cur_file_counter
-    filename = f"{cur_file_counter}.mp4"
-
-    if not hasattr(update.message, "text"):
-        return
-
-    url = extract_url(update.message.text)
-
-    if url is None:
-        return
-
-    if not is_auto_download(url):
-        return
-
-    context.bot.send_chat_action(
-        chat_id=update.effective_message.chat_id, action=ChatAction.UPLOAD_VIDEO
-    )
-
-
-    logging.debug(f"Downloading from {url}...")
-    err = download_video(url, filename)
-
-    if not os.path.exists(filename):
-        update.message.reply_text("Error downloading video")
-        return
-
-    cur_file_counter += 1
-
-    update.message.reply_video(open(filename, "rb"), supports_streaming=True)
-
-    # elif err == 99999:
-    #     update.message.reply_text(
-    #         f"Video is too long, must be shorter than {MAX_VID_LENGTH} seconds"
-    #     )
-    # else:
-    #     update.message.reply_text(
-    #         f"Could not download, error {err} . Video has to be shorter than {MAX_VID_LENGTH} seconds. Tell @creikey or @ruwix"
-    #     )
+    parse_message(update, context, False, False)
 
 
 def main():
     # get telegram bot token
     with open("token.txt", "r") as token_file:
-        token = token_file.read()
+        token = token_file.read().rstrip("\n")
         updater = Updater(token, use_context=True)
 
     # remove old download directory
-    if os.path.exists(DOWNLOADS_DIR):
-        shutil.rmtree(DOWNLOADS_DIR)
+    if os.path.exists(download_dir):
+        shutil.rmtree(download_dir)
 
     # make download directory
-    os.mkdir(DOWNLOADS_DIR)
-    os.chdir(DOWNLOADS_DIR)
+    os.mkdir(download_dir)
+    os.chdir(download_dir)
 
     # add message handler
-    updater.dispatcher.add_handler(CommandHandler("download",download_command))
+    updater.dispatcher.add_handler(CommandHandler("download", download_command))
+    updater.dispatcher.add_handler(CommandHandler("daudio", audio_command))
     updater.dispatcher.add_handler(
         MessageHandler(callback=on_message, filters=Filters.text)
     )
