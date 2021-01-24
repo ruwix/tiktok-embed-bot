@@ -19,6 +19,7 @@ logging.getLogger("filelock").disabled = True
 
 download_dir = "videos"
 max_file_size = 100
+send_timeout = 100
 
 cur_file_counter = 0
 downloaded_files = []
@@ -52,10 +53,13 @@ def download_video(url: str, ydl_opts: dict) -> int:
     """Download a url to the computer"""
     with youtube_dl.YoutubeDL(ydl_opts) as ydl:
         try:
-            err = ydl.download([url])
+            info = ydl.extract_info(url, download=True)
+            title = info.get("title", "Error Getting Title")
+            err = False
         except Exception:
-            err = -1
-    return err
+            err = True
+            title = None
+    return title, err
 
 
 def extract_url(message):
@@ -90,7 +94,7 @@ def parse_message(update, context, is_command=False, force_audio=False):
 
     # check if the file has already been downloaded
     for downloaded in downloaded_files:
-        if downloaded["url"] == url:
+        if downloaded["url"] == url and (not force_audio == downloaded["is_video"]):
             user = update.message.from_user["username"]
             # check if the sent file was in another chat
             if update.message.chat_id != downloaded["message"].chat_id:
@@ -149,9 +153,9 @@ def parse_message(update, context, is_command=False, force_audio=False):
         )
 
     # download and check for errors
-    err = download_video(url, ydl_opts)
+    title, err = download_video(url, ydl_opts)
 
-    if not os.path.exists(filename):
+    if not os.path.exists(filename) or err:
         update.message.reply_text("Error downloading")
         return
 
@@ -159,11 +163,19 @@ def parse_message(update, context, is_command=False, force_audio=False):
 
     if force_audio:
         # send the file as audio
-        reply_message = update.message.reply_audio(open(filename, "rb"), timeout=100)
+        new_filename = f"{title}.mp3"
+        os.rename(filename, new_filename)
+        reply_message = update.message.reply_audio(
+            open(new_filename, "rb"), timeout=send_timeout, title=title
+        )
     else:
         # send the file as a videos
-        reply_message = update.message.reply_video(open(filename, "rb"), timeout=100)
-    downloaded_files.append({"url": url, "message": reply_message})
+        reply_message = update.message.reply_video(
+            open(filename, "rb"), timeout=send_timeout
+        )
+    downloaded_files.append(
+        {"url": url, "message": reply_message, "is_video": not force_audio}
+    )
 
 
 def download_command(update, context):
