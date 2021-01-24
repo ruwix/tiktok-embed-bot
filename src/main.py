@@ -178,6 +178,20 @@ def parse_message(update, context, is_command=False, force_audio=False):
     )
 
 
+def help_command(update, context):
+    update.message.reply_text(
+        (
+            "i download videos and audio.\n"
+            + "\n"
+            + "/download - provide/reply to a url to download it as a video\n"
+            + "/daudio - provide/reply to a url to download it as an mp3\n"
+            + "/help - bring up this help menu\n"
+            + "\n"
+            + "powered by youtube-dl.\n"
+        )
+    )
+
+
 def download_command(update, context):
     parse_message(update, context, True, False)
 
@@ -205,6 +219,7 @@ def main():
     os.chdir(download_dir)
 
     # add message handler
+    updater.dispatcher.add_handler(CommandHandler("help", help_command))
     updater.dispatcher.add_handler(CommandHandler("download", download_command))
     updater.dispatcher.add_handler(CommandHandler("daudio", audio_command))
     updater.dispatcher.add_handler(
