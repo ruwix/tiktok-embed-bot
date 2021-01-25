@@ -26,22 +26,30 @@ downloaded_files = []
 
 
 # custom url regexs
-tiktok_regex = re.compile("https?://(?:www\.)?(?:vm\.)?tiktok\.com/[^/]+/?")
+tiktok_regex = re.compile("https?://(?:vm\.)?tiktok\.com/[^/]+/?")
 youtube_regex = re.compile("https?://(?:www\.)?youtube\.com/[^/]+/?")
-youtube_mobile_regex = re.compile("https?://(?:www\.)?youtu\.be\/[^/]+/?")
+youtube_mobile_regex = re.compile("https?://youtu\.be\/[^/]+/?")
+youtube_music = re.compile("https?://music\.youtube\.com\/watch\?[^/]+/?")
 
 # links that youtube dl wont catch
 problem_regex = [tiktok_regex]
 # links that should download without a command
-auto_download_regex = [tiktok_regex, youtube_regex, youtube_mobile_regex]
+auto_download_regex = [tiktok_regex, youtube_regex, youtube_mobile_regex, youtube_music]
+# links that are guaranteed audio
+audio_regex = [youtube_music]
 
 
-def is_video(url: str) -> bool:
+def is_downloadable(url: str) -> bool:
     """Check if a url is one which can be downloaded"""
     for extractor in youtube_dl.extractor.gen_extractors():
         if extractor.suitable(url) and extractor.IE_NAME != "generic":
             return True
     return any(regex.match(url) is not None for regex in problem_regex)
+
+
+def is_audio(url: str) -> bool:
+    """Check if a url is guaranteed to be audio"""
+    return any(regex.match(url) is not None for regex in audio_regex)
 
 
 def is_auto_download(url: str) -> bool:
@@ -71,7 +79,9 @@ def extract_url(message):
     return url
 
 
-def parse_message(update, context, is_command=False, force_audio=False):
+def parse_message(
+    update, context, is_command=False, force_audio=False, check_audio=True
+):
     """Parse a any message and check whether or not it contains a link,
     whether or not it is a command, and whether or not it can actually download something"""
     global cur_file_counter
@@ -92,6 +102,16 @@ def parse_message(update, context, is_command=False, force_audio=False):
         else:
             return
 
+    # make sure we can actually download the url
+    if not is_command and not is_auto_download(url):
+        return
+
+    if not is_downloadable(url):
+        return
+
+    if is_audio(url) and check_audio:
+        force_audio = True
+
     # check if the file has already been downloaded
     for downloaded in downloaded_files:
         if downloaded["url"] == url and (not force_audio == downloaded["is_video"]):
@@ -105,13 +125,6 @@ def parse_message(update, context, is_command=False, force_audio=False):
                 already_sent_message = downloaded["message"]
             already_sent_message.reply_text(f"@{user}")
             return
-
-    # make sure we can actually download the url
-    if not is_command and not is_auto_download(url):
-        return
-
-    if not is_video(url):
-        return
 
     logging.debug(f"Downloading from {url}...")
 
@@ -193,15 +206,15 @@ def help_command(update, context):
 
 
 def download_command(update, context):
-    parse_message(update, context, True, False)
+    parse_message(update, context, is_command=True)
 
 
 def audio_command(update, context):
-    parse_message(update, context, True, True)
+    parse_message(update, context, is_command=True, force_audio=True)
 
 
 def on_message(update, context):
-    parse_message(update, context, False, False)
+    parse_message(update, context, check_audio=True)
 
 
 def main():
