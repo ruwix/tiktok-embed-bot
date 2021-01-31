@@ -90,6 +90,9 @@ def parse_message(
     if not hasattr(update.message, "text"):
         return
 
+    # check if dm
+    is_dm = int(update.message.chat.id) > 0
+
     url = extract_url(update.message.text)
 
     # if it's a check up one reply for url
@@ -103,7 +106,7 @@ def parse_message(
             return
 
     # make sure we can actually download the url
-    if not is_command and not is_auto_download(url):
+    if (not is_command and not is_auto_download(url)) and not is_dm:
         return
 
     if not is_downloadable(url):
